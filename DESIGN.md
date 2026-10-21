@@ -1,374 +1,161 @@
-# CodeMate Workflow — Design Document
+# CodeMate Workflow 设计说明
 
-## 1. 设计目标
+## 1. 目标与范围
 
-CodeMate Workflow 是一个基于大语言模型的多 Agent 协作工作流，用于演示软件开发过程中从需求分析到方案设计、再到代码生成的基本流程。
+本项目实现一个轻量级的 Mini SE 软件开发工作流：将用户的自然语言需求依次交给需求分析、方案设计和代码生成三个 Agent。项目重点是演示 Agent 职责划分、阶段间信息传递、顺序编排及运行状态管理。
 
-项目选择 Mini SE（Software Engineering）流程作为实现方向，将软件开发任务拆分为三个相互衔接的阶段：
+当前版本面向命令行使用，不包含可视化编排、并行执行、跨运行状态存储或自动恢复机制。
 
-**需求分析 → 方案设计 → 代码生成**
-
-本项目的主要设计目标包括：
-
-1. 将复杂任务拆分为职责明确的 Agent。
-2. 通过顺序编排组织 Agent 的执行流程。
-3. 实现 Agent 之间的消息传递和工作流状态管理。
-4. 采用公共基础类复用模型调用逻辑。
-5. 保持代码结构清晰，方便后续增加 Agent 和扩展工作流。
-
-当前版本定位为可运行的 MVP，不引入复杂的调度系统或可视化编排组件。
-
-## 2. 总体架构
-
-系统由三个 Agent、一个公共模型调用基础类和一个工作流编排模块组成。
+## 2. 架构概览
 
 ```text
-                    用户原始需求
-                          |
-                          v
-                 +------------------+
-                 |   workflow.py    |
-                 |  工作流编排与状态管理 |
-                 +------------------+
-                          |
-                          v
-                 +------------------+
-                 | RequirementAgent |
-                 |     需求分析      |
-                 +------------------+
-                          |
-                    需求分析结果
-                          |
-                          v
-                 +------------------+
-                 |   DesignAgent    |
-                 |     方案设计      |
-                 +------------------+
-                          |
-                      设计方案
-                          |
-                          v
-                 +------------------+
-                 |   CodingAgent    |
-                 |     代码生成      |
-                 +------------------+
-                          |
-                       生成代码
-                          |
-                          v
-                  generated_program.py
+用户需求
+   │
+   ▼
+SimpleWorkflow
+   ├── RequirementAgent ──需求分析文本──┐
+   ├── DesignAgent ◄────────────────────┘
+   │        │
+   │        └──设计方案──┐
+   └── CodingAgent ◄─────┘
+            │
+            ▼
+     去除代码围栏并做 AST 语法检查
+            │
+            ▼
+     generated_program.py
 ```
 
-三个 Agent 复用 `ModelAgent` 提供的大模型调用能力。工作流负责控制执行顺序、传递前序输出、记录运行状态和保存生成代码。
+`RequirementAgent`、`DesignAgent` 和 `CodingAgent` 都继承 `ModelAgent`。`ModelAgent` 使用统一的 OpenAI 兼容客户端调用百炼服务，具体 API Key、服务地址和模型名由 `config.py` 提供。
 
-## 3. 模块设计
+## 3. Agent 职责和接口
 
-### 3.1 ModelAgent：公共模型调用基础类
+### 3.1 ModelAgent
 
 文件：`agents/model_agent.py`
 
-ModelAgent 封装访问大语言模型的通用逻辑，使不同 Agent 不必重复编写 API 初始化和模型请求代码。
+公共基类负责创建模型客户端，并组合系统提示词和用户输入发送请求。`run(user_input)` 返回模型回答文本。当前调用为同步调用，没有重试逻辑。
 
-主要职责：
-
-- 从 `config.py` 读取 API Key、模型服务地址和模型名称。
-- 初始化模型客户端。
-- 接收系统提示词和用户输入。
-- 调用大语言模型并返回文本结果。
-
-主要接口：
-
-```python
-ModelAgent(system_prompt)
-ModelAgent.run(user_input)
-```
-
-其中，`system_prompt` 用于定义不同 Agent 的职责，`run(user_input)` 负责将任务输入发送给模型并返回回答。
-
-### 3.2 RequirementAgent：需求分析
+### 3.2 RequirementAgent
 
 文件：`agents/requirement_agent.py`
 
-RequirementAgent 负责分析用户的原始软件需求，将自然语言描述整理为结构化的需求说明。
+接收用户原始需求，整理目标、输入、输出、处理规则和边界情况。它只负责分析，不设计模块或编写程序。
 
-主要职责：
-
-- 提炼功能目标。
-- 识别输入与输出要求。
-- 整理明确的处理规则。
-- 指出与核心功能相关的边界情况和待确认事项。
-- 不直接编写完整程序代码。
-
-输出结果采用五部分结构：
-
-1. 功能目标
-2. 输入要求
-3. 输出要求
-4. 处理规则
-5. 边界情况
-
-主要接口：
-
-```python
-RequirementAgent.run(user_input)
-```
-
-输入为用户的原始软件需求，输出为需求分析文本。
-
-### 3.3 DesignAgent：方案设计
+### 3.3 DesignAgent
 
 文件：`agents/design_agent.py`
 
-DesignAgent 根据需求分析结果制定软件设计方案，为后续代码生成提供实现依据。
+接收需求分析文本，输出设计目标、模块划分、处理流程、接口和边界处理方案。它不生成完整程序代码。
 
-主要职责：
-
-- 根据需求划分必要的功能模块。
-- 明确各模块的职责。
-- 梳理程序的处理流程。
-- 定义主要函数或接口及其输入、输出。
-- 说明关键边界情况的处理方式。
-- 保持设计与已确定需求一致，避免无依据地扩大项目范围。
-
-主要接口：
-
-```python
-DesignAgent.run(requirement_analysis)
-```
-
-输入为 RequirementAgent 的需求分析结果，输出为软件设计方案。
-
-### 3.4 CodingAgent：代码生成
+### 3.4 CodingAgent
 
 文件：`agents/coding_agent.py`
 
-CodingAgent 根据用户原始需求、需求分析结果和设计方案生成程序代码。
+接收原始需求、需求分析结果和设计方案，输出完整 Python 程序。提示词要求它遵循用户明确要求并提供必要的交互操作提示；提示词只能引导模型，不能保证输出完全正确。
 
-主要职责：
+## 4. 阶段配置与执行
 
-- 使用需求分析结果理解需要实现的功能。
-- 依据设计方案组织代码结构和处理流程。
-- 遵循用户明确提出的要求。
-- 当发现设计内容与原始需求存在冲突时，避免直接实现冲突内容。
-- 输出完整、可运行的代码，而不是仅提供伪代码或设计说明。
+### 4.1 WorkflowStage
 
-主要接口：
+`workflow.py` 使用不可变数据类 `WorkflowStage` 描述工作流节点：
 
-```python
-CodingAgent.run(
-    user_requirement,
-    requirement_analysis,
-    design_plan
-)
-```
-
-该接口接收三项输入：
-
-- `user_requirement`：用户的原始需求，用于核对最终实现。
-- `requirement_analysis`：需求分析结果，作为结构化的功能依据。
-- `design_plan`：设计方案，作为代码组织和实现流程的直接依据。
-
-三项输入各有用途，不能通过只传递原始需求而绕过前两个 Agent 的工作。
-
-### 3.5 SimpleWorkflow：工作流编排模块
-
-文件：`workflow.py`
-
-`SimpleWorkflow` 负责创建三个 Agent，并按照固定顺序调用它们。
-
-主要职责：
-
-- 接收用户原始需求。
-- 创建和管理三个 Agent 实例。
-- 依次执行需求分析、方案设计和代码生成。
-- 维护共享状态。
-- 检查各阶段是否返回有效内容。
-- 记录当前执行阶段及错误信息。
-- 对生成代码进行基础清理，并交给程序入口保存到文件。
-
-工作流采用同步顺序执行方式。后一个阶段只有在前一阶段成功返回有效内容后才会执行。
-
-## 4. 工作流执行设计
-
-### 4.1 执行步骤
-
-**第一阶段：需求分析**
-
-工作流将用户输入传递给 RequirementAgent，并将返回结果保存在共享状态中。
-
-**第二阶段：方案设计**
-
-工作流将需求分析结果传递给 DesignAgent，获取设计方案后保存到共享状态。
-
-**第三阶段：代码生成**
-
-工作流将用户原始需求、需求分析结果和设计方案传递给 CodingAgent，获得最终代码。
-
-**第四阶段：结果保存**
-
-工作流完成后，程序入口将生成的代码写入 `generated_program.py`。再次运行工作流时，已有文件可能被覆盖。
-
-### 4.2 顺序执行
-
-当前版本采用固定顺序：
-
-```text
-RequirementAgent
-       |
-       v
-DesignAgent
-       |
-       v
-CodingAgent
-       |
-       v
-保存生成代码
-```
-
-三个 Agent 不并行执行，因为每个阶段都需要使用前一个阶段产生的结果。
-
-## 5. 共享状态设计
-
-在 `SimpleWorkflow.run()` 中，使用 Python 字典 `state` 记录一次工作流运行所需的数据。
-
-主要字段如下：
-
-| 字段 | 类型 | 含义 |
-|---|---|---|
-| `user_requirement` | `str` | 用户输入的原始软件需求 |
-| `requirement_analysis` | `str` | RequirementAgent 的输出 |
-| `design_plan` | `str` | DesignAgent 的输出 |
-| `generated_code` | `str` | CodingAgent 生成的程序代码 |
-| `current_stage` | `str` | 当前执行阶段 |
-| `status` | `str` | 工作流状态 |
-| `error` | `str` 或 `None` | 执行失败时记录的错误信息 |
-
-其中：
-
-- `status = "running"` 表示工作流正在执行。
-- `status = "completed"` 表示三个阶段已成功执行。
-- `status = "failed"` 表示工作流在某个阶段失败。
-
-共享状态有两个用途：
-
-1. 保存各阶段结果，供后续处理和最终输出使用。
-2. 在发生错误时记录当前阶段及错误信息，便于定位问题。
-
-当前状态只存在于内存中，不会自动保存到数据库或文件，也不支持跨运行恢复。
-
-## 6. Agent 间通信机制
-
-当前版本通过函数参数传递消息，而不是采用消息队列或独立的通信服务。
-
-具体流程如下：
-
-```text
-用户原始需求
-      |
-      v
-RequirementAgent.run(user_requirement)
-      |
-      v
-requirement_analysis
-      |
-      v
-DesignAgent.run(requirement_analysis)
-      |
-      v
-design_plan
-      |
-      v
-CodingAgent.run(
-    user_requirement,
-    requirement_analysis,
-    design_plan
-)
-      |
-      v
-generated_code
-```
-
-工作流将每个 Agent 的返回结果保存在 `state` 中，并在下一个阶段通过函数参数传入。
-
-这种方式实现简单、执行过程清楚，适合当前规模的 MVP。
-
-## 7. 提示词与职责边界
-
-每个 Agent 都使用独立的系统提示词，以明确当前阶段的任务与输出形式。
-
-- RequirementAgent 关注需求的提取与整理。
-- DesignAgent 关注模块、流程和接口设计。
-- CodingAgent 关注代码实现，并使用前序阶段的结果。
-
-提示词用于引导模型的行为，但不能保证模型在所有情况下都严格遵守要求。因此，项目仍需要依赖代码层面的流程控制、输出检查和实际测试来发现问题。
-
-当前版本主要检查各阶段是否返回非空内容，并通过异常捕获报告失败；尚未实现更严格的结构化输出校验。
-
-## 8. 错误处理设计
-
-工作流在执行过程中使用异常捕获机制处理基础错误。
-
-当某个 Agent 调用失败或未返回有效内容时：
-
-1. 当前阶段记录在 `current_stage` 中。
-2. 将 `status` 设置为 `"failed"`。
-3. 将错误信息记录在 `error` 中。
-4. 停止后续阶段，并向用户报告失败。
-
-当前版本不实现自动重试或自动恢复。对于最终文件的保存失败，程序入口会另外报告文件写入错误。
-
-## 9. 代码生成与结果保存
-
-CodingAgent 返回代码后，工作流会清理模型偶尔输出的 Markdown 代码围栏。
-
-程序入口将清理后的代码保存到：
-
-```text
-generated_program.py
-```
-
-当前版本不会自动执行生成的程序，也没有内置代码语法检查或自动修复流程。生成结果需要通过人工检查和独立运行进行验证。
-
-## 10. 测试设计
-
-项目通过不同层次的测试脚本验证功能：
-
-| 测试文件 | 测试内容 |
+| 字段 | 含义 |
 |---|---|
-| `test_requirement_agent.py` | 单独调用需求分析 Agent |
-| `test_design_agent.py` | 调用需求分析和方案设计两个阶段 |
-| `test_coding_agent.py` | 调用三个 Agent，生成并保存代码 |
-| `workflow.py` | 验证正式入口下的完整工作流 |
+| `name` | 阶段名称，用于终端提示和错误追踪 |
+| `output_key` | 阶段结果写入共享状态时使用的字段名 |
+| `run` | 接收当前状态字典并返回字符串结果的函数 |
 
-已进行的基本验证包括：
+默认阶段在 `SimpleWorkflow._build_stages()` 中按顺序配置。`SimpleWorkflow(stages=...)` 可以接收自定义阶段列表；每个阶段读取需要的状态字段并写回自己的输出字段。空阶段列表会被拒绝。
 
-- 三个 Agent 能够按顺序执行。
-- 前序阶段的输出能够传递给后续 Agent。
-- 生成的代码能够保存到文件。
-- 学生成绩统计示例能够执行，并输出正确的统计结果。
-- 生成的示例程序能够处理空输入，并跳过当前默认策略下的非数字输入。
+### 4.2 默认阶段的数据流
 
-上述测试属于项目开发过程中的基本功能验证，尚不代表所有软件需求下的生成结果都能正确运行。
+```text
+state.user_requirement
+        │
+        ▼
+RequirementAgent.run(user_requirement)
+        │
+        ▼
+state.requirement_analysis
+        │
+        ▼
+DesignAgent.run(requirement_analysis)
+        │
+        ▼
+state.design_plan
+        │
+        ▼
+CodingAgent.run(user_requirement, requirement_analysis, design_plan)
+        │
+        ▼
+state.generated_code
+```
 
-## 11. 当前限制与改进方向
+`SimpleWorkflow.run()` 遍历阶段列表。阶段只有在前一阶段成功并返回非空字符串后才会运行。默认代码生成阶段会清理 Markdown 围栏，并通过 `ast.parse()` 检查语法。
 
-当前版本优先实现完整、清晰的基础流程，尚未覆盖更复杂的工作流能力。
+### 4.3 默认入口
 
-后续可以考虑以下改进：
+`main()` 从终端读取多行需求，以空行为输入结束标记；执行默认工作流后，将 `generated_code` 写入项目当前目录的 `generated_program.py`。保存文件可能覆盖之前的生成结果。程序不会自动执行生成文件。
 
-1. **代码语法检查：** 在保存代码前使用 Python 语法解析能力检查生成结果。
-2. **日志与追踪：** 记录每个阶段的开始、结束、耗时和失败信息。
-3. **结构化输出检查：** 对需求分析、设计方案和代码生成结果增加必要校验。
-4. **自动重试与恢复：** 对可恢复的模型调用失败进行有限次数的重试。
-5. **自动化测试：** 为工作流和关键函数增加可重复运行的测试。
-6. **流程扩展：** 根据实际需要增加条件分支或新的 Agent。
+## 5. 共享状态
 
-这些能力属于后续完善方向，不属于当前版本已经实现的功能。
+每次 `run()` 创建独立的状态字典：
 
-## 12. 设计总结
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `user_requirement` | `str` | 用户原始需求 |
+| `requirement_analysis` | `str` | 需求分析阶段结果 |
+| `design_plan` | `str` | 方案设计阶段结果 |
+| `generated_code` | `str` | 代码生成阶段结果 |
+| `current_stage` | `str` | 正在执行的阶段或最终阶段标记 |
+| `status` | `str` | `running`、`completed` 或 `failed` |
+| `error` | `str` 或 `None` | 工作流失败摘要 |
+| `stage_timings` | `dict[str, float]` | 各阶段耗时，单位为秒 |
+| `stage_errors` | `dict[str, str]` | 各失败阶段及其错误详情 |
 
-CodeMate Workflow 采用公共模型调用基础类、三个职责明确的 Agent 和统一工作流编排模块，形成了一个顺序执行的软件开发流程。
+阶段结果写入状态后，后续阶段通过状态字典读取。状态只保存在内存中，工作流结束后不会写入文件或数据库。
 
-本设计的重点不在于复杂调度，而在于通过明确的 Agent 分工、函数参数传递和共享状态管理，使需求分析、方案设计和代码生成能够作为一个整体协作运行。
+## 6. 配置与错误处理
 
-该架构保持了较低的实现复杂度，也为后续增加代码检查、日志、测试和其他工作流节点预留了扩展空间。
+`config.py` 使用 `python-dotenv` 从项目根目录的 `.env` 读取 `DASHSCOPE_API_KEY`。创建默认工作流前会调用 `validate_config()`；缺少 Key 时抛出中文配置错误，由 `main()` 显示并结束。`.env` 不应提交到版本控制。
+
+执行阶段出现异常或返回空内容时，工作流会：
+
+1. 将错误写入 `stage_errors`，并将耗时写入 `stage_timings`；
+2. 设置 `status` 为 `failed`，保留失败的 `current_stage`；
+3. 在 `error` 中记录阶段名称和异常信息；
+4. 停止后续阶段。
+
+阶段耗时和成功/失败状态会打印到终端。当前没有自动重试或自动恢复。最终文件写入失败由 `main()` 单独报告。
+
+## 7. 测试策略
+
+### 7.1 自动化测试
+
+`tests/test_workflow.py` 使用 `unittest.mock` 替代三个 Agent，不访问网络、不需要 API Key。它检查：
+
+- 三个阶段的调用顺序和前序结果传递；
+- 状态字段、阶段耗时是否生成；
+- 某阶段失败后是否记录错误并阻止后续阶段；
+- 生成代码语法错误是否作为代码生成阶段失败处理。
+
+`tests/test_config.py` 检查 API Key 缺失和已配置两种情况。运行命令：
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+这些测试验证工作流编排和配置逻辑，不判断真实模型回答的质量，也不证明模型生成程序在功能上正确。
+
+### 7.2 真实模型演示脚本
+
+项目根目录中的 `test_requirement_agent.py`、`test_design_agent.py` 和 `test_coding_agent.py` 会调用真实模型，适合观察 Agent 输出，需要网络和 API Key，并可能产生费用。`test_coding_agent.py` 直接调用三个 Agent 并保存代码，不经过 `SimpleWorkflow` 的阶段状态、耗时和语法校验。
+
+## 8. 当前限制
+
+- 模型输出存在不确定性，提示词不等同于输出校验。
+- AST 检查只检查语法，不会执行生成程序，也不能验证业务行为。
+- 流程为同步顺序执行；没有高级分支、循环、并行、模型调用重试或自动修复。
+- 阶段记录仅在当前运行中保留，未持久化；终端输出不是结构化日志文件。
+- 自动化测试使用假响应，只覆盖程序编排；真实模型行为需通过演示脚本和针对生成程序的功能检查评估。
